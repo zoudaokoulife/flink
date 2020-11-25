@@ -86,6 +86,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -162,6 +163,7 @@ public class StreamingJobGraphGenerator {
 
 		// make sure that all vertices start immediately
 		jobGraph.setScheduleMode(streamGraph.getScheduleMode());
+		jobGraph.enableApproximateLocalRecovery(streamGraph.getCheckpointConfig().isApproximateLocalRecoveryEnabled());
 
 		// Generate deterministic hashes for the nodes in order to identify them across
 		// submission iff they didn't change.
@@ -215,6 +217,12 @@ public class StreamingJobGraphGenerator {
 					"Checkpointing is currently not supported by default for iterative jobs, as we cannot guarantee exactly once semantics. "
 						+ "State checkpoints happen normally, but records in-transit during the snapshot will be lost upon failure. "
 						+ "\nThe user can force enable state checkpoints with the reduced guarantees by calling: env.enableCheckpointing(interval,true)");
+			}
+			if (streamGraph.isIterative() && checkpointConfig.isUnalignedCheckpointsEnabled() && !checkpointConfig.isForceUnalignedCheckpoints()) {
+				throw new UnsupportedOperationException(
+					"Unaligned Checkpoints are currently not supported for iterative jobs, "
+						+ " as rescaling would require alignment (in addition to the reduced checkpointing guarantees)."
+						+ "\nThe user can force Unaligned Checkpoints by using 'execution.checkpointing.unaligned.forced'");
 			}
 
 			ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
@@ -363,7 +371,7 @@ public class StreamingJobGraphGenerator {
 						chainEntryPoints);
 			}
 
-			chainedNames.put(currentNodeId, createChainedName(currentNodeId, chainableOutputs));
+			chainedNames.put(currentNodeId, createChainedName(currentNodeId, chainableOutputs, Optional.ofNullable(chainEntryPoints.get(currentNodeId))));
 			chainedMinResources.put(currentNodeId, createChainedMinResources(currentNodeId, chainableOutputs));
 			chainedPreferredResources.put(currentNodeId, createChainedPreferredResources(currentNodeId, chainableOutputs));
 
@@ -422,8 +430,10 @@ public class StreamingJobGraphGenerator {
 			.computeIfAbsent(startNodeId, k -> new InputOutputFormatContainer(Thread.currentThread().getContextClassLoader()));
 	}
 
-	private String createChainedName(Integer vertexID, List<StreamEdge> chainedOutputs) {
-		String operatorName = streamGraph.getStreamNode(vertexID).getOperatorName();
+	private String createChainedName(Integer vertexID, List<StreamEdge> chainedOutputs, Optional<OperatorChainInfo> operatorChainInfo) {
+		final String operatorName = nameWithChainedSourcesInfo(
+			streamGraph.getStreamNode(vertexID).getOperatorName(),
+			operatorChainInfo.map(chain -> chain.getChainedSources().values()).orElse(Collections.emptyList()));
 		if (chainedOutputs.size() > 1) {
 			List<String> outputChainedNames = new ArrayList<>();
 			for (StreamEdge chainable : chainedOutputs) {
@@ -608,6 +618,7 @@ public class StreamingJobGraphGenerator {
 		final CheckpointConfig checkpointCfg = streamGraph.getCheckpointConfig();
 
 		config.setStateBackend(streamGraph.getStateBackend());
+		config.setGraphContainingLoops(streamGraph.isIterative());
 		config.setTimerServiceProvider(streamGraph.getTimerServiceProvider());
 		config.setCheckpointingEnabled(checkpointCfg.isCheckpointingEnabled());
 		config.setCheckpointMode(getCheckpointingMode(checkpointCfg));
@@ -692,6 +703,8 @@ public class StreamingJobGraphGenerator {
 		}
 		// set strategy name so that web interface can show it.
 		jobEdge.setShipStrategyName(partitioner.toString());
+		jobEdge.setDownstreamSubtaskStateMapper(partitioner.getDownstreamSubtaskStateMapper());
+		jobEdge.setUpstreamSubtaskStateMapper(partitioner.getUpstreamSubtaskStateMapper());
 
 		if (LOG.isDebugEnabled()) {
 			LOG.debug("CONNECTED: {} - {} -> {}", partitioner.getClass().getSimpleName(),
@@ -734,6 +747,8 @@ public class StreamingJobGraphGenerator {
 				}
 			case ALL_EDGES_PIPELINED:
 				return ResultPartitionType.PIPELINED_BOUNDED;
+			case ALL_EDGES_PIPELINED_APPROXIMATE:
+				return ResultPartitionType.PIPELINED_APPROXIMATE;
 			default:
 				throw new RuntimeException("Unrecognized global data exchange mode " + streamGraph.getGlobalDataExchangeMode());
 		}
@@ -1018,6 +1033,9 @@ public class StreamingJobGraphGenerator {
 			final Set<ManagedMemoryUseCase> groupSlotScopeUseCases,
 			final StreamConfig operatorConfig) {
 
+		// For each operator, make sure fractions are set for all use cases in the group, even if the operator does not
+		// have the use case (set the fraction to 0.0). This allows us to learn which use cases exist in the group from
+		// either one of the stream configs.
 		if (groupResourceSpec.equals(ResourceSpec.UNKNOWN)) {
 			for (Map.Entry<ManagedMemoryUseCase, Integer> entry : groupManagedMemoryWeights.entrySet()) {
 				final ManagedMemoryUseCase useCase = entry.getKey();
@@ -1156,6 +1174,15 @@ public class StreamingJobGraphGenerator {
 			serializedHooks);
 
 		jobGraph.setSnapshotSettings(settings);
+	}
+
+	private static String nameWithChainedSourcesInfo(String operatorName, Collection<ChainedSourceInfo> chainedSourceInfos) {
+		return chainedSourceInfos.isEmpty() ? operatorName :
+			String.format("%s [%s]", operatorName, chainedSourceInfos
+				.stream()
+				.map(chainedSourceInfo -> chainedSourceInfo.getOperatorConfig().getOperatorName())
+				.collect(Collectors.joining(", "))
+			);
 	}
 
 	/**

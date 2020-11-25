@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.io.network.partition.consumer;
 
+import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
 import org.apache.flink.runtime.event.TaskEvent;
 import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
 import org.apache.flink.runtime.io.network.partition.PrioritizedDeque;
@@ -26,7 +27,6 @@ import org.apache.flink.shaded.guava18.com.google.common.collect.Sets;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -267,11 +267,11 @@ public class UnionInputGate extends InputGate {
 	}
 
 	@Override
-	public void resumeConsumption(int channelIndex) throws IOException {
+	public void resumeConsumption(InputChannelInfo channelInfo) throws IOException {
 		// BEWARE: consumption resumption only happens for streaming jobs in which all
 		// slots are allocated together so there should be no UnknownInputChannel. We
 		// will refactor the code to not rely on this assumption in the future.
-		getChannel(channelIndex).resumeConsumption();
+		inputGatesByGateIndex.get(channelInfo.getGateIdx()).resumeConsumption(channelInfo);
 	}
 
 	@Override
@@ -314,6 +314,12 @@ public class UnionInputGate extends InputGate {
 					return;
 				}
 
+				if (priority && !inputGate.getPriorityEventAvailableFuture().isDone()) {
+					// Since notification is not atomic in respect to gate enqueuing, priority event may already be polled by
+					// task thread when netty enqueues the gate, so just ignore the notification.
+					return;
+				}
+
 				inputGatesWithData.add(inputGate, priority, alreadyEnqueued);
 
 				if (priority && inputGatesWithData.getNumPriorityElements() == 1) {
@@ -338,9 +344,7 @@ public class UnionInputGate extends InputGate {
 			}
 		}
 
-		Iterator<IndexedInputGate> inputGateIterator = inputGatesWithData.iterator();
-		IndexedInputGate inputGate = inputGateIterator.next();
-		inputGateIterator.remove();
+		IndexedInputGate inputGate = inputGatesWithData.poll();
 
 		if (inputGatesWithData.isEmpty()) {
 			availabilityHelper.resetUnavailable();

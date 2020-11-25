@@ -250,7 +250,10 @@ public abstract class BeamPythonFunctionRunner implements PythonFunctionRunner {
 		Struct pipelineOptions = PipelineOptionsTranslation.toProto(portableOptions);
 
 		if (memoryManager != null && config.isUsingManagedMemory()) {
-			Preconditions.checkArgument(managedMemoryFraction > 0 && managedMemoryFraction <= 1.0);
+			Preconditions.checkArgument(managedMemoryFraction > 0 && managedMemoryFraction <= 1.0,
+				"The configured managed memory fraction for Python worker process must be within (0, 1], was: %s. " +
+				"It may be because the consumer type \"Python\" was missing or set to 0 for the config option \"taskmanager.memory.managed.consumer-weights\"." +
+				managedMemoryFraction);
 
 			final LongFunctionWithException<PythonSharedResources, Exception> initializer = (size) ->
 				new PythonSharedResources(createJobBundleFactory(pipelineOptions), createPythonExecutionEnvironment(size));
@@ -709,8 +712,12 @@ public abstract class BeamPythonFunctionRunner implements PythonFunctionRunner {
 				byte[] keyBytes = bagUserState.getKey().toByteArray();
 				bais.setBuffer(keyBytes, 0, keyBytes.length);
 				Object key = keySerializer.deserialize(baisWrapper);
-				keyedStateBackend.setCurrentKey(
-					((RowDataSerializer) keyedStateBackend.getKeySerializer()).toBinaryRow((RowData) key));
+				if (keyedStateBackend.getKeySerializer() instanceof RowDataSerializer) {
+					keyedStateBackend.setCurrentKey(
+						((RowDataSerializer) keyedStateBackend.getKeySerializer()).toBinaryRow((RowData) key));
+				} else {
+					keyedStateBackend.setCurrentKey(key);
+				}
 			} else {
 				throw new RuntimeException("Unsupported bag state request: " + request);
 			}

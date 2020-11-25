@@ -46,11 +46,10 @@ Flink 还支持将 Flink SQL 中的 INSERT / UPDATE / DELETE 消息编码为 Can
 依赖
 ------------
 
-为了设置 Canal 格式，下表提供了使用自动化构建工具（例如：Maven 或 SBT）项目和使用绑定 SQL JAR 包的 SQL Client 所需的依赖信息。
-
-| Maven 依赖   | SQL Client JAR         |
-| :----------------- | :----------------------|
-| `flink-json`       | 内置               |
+{% assign connector = site.data.sql-connectors['canal'] %} 
+{% include sql-connector-download-table.html 
+    connector=connector
+%}
 
 *注意：有关如何部署 Canal 以将变更日志同步到消息队列，请参阅 [Canal 文档](https://github.com/alibaba/canal/wiki)。*
 
@@ -176,13 +175,33 @@ Format 参数
        <td>选填</td>
        <td style="word-wrap: break-word;"><code>'SQL'</code></td>
        <td>String</td>
-       <td>指定输入和输出时间戳格式。 当前支持的值是 <code>'SQL'</code> 和 <code>'ISO-8601'</code>:
+       <td>指定输入和输出时间戳格式。当前支持的值是 <code>'SQL'</code> 和 <code>'ISO-8601'</code>:
        <ul>
          <li>选项 <code>'SQL'</code> 将解析 "yyyy-MM-dd HH:mm:ss.s{precision}" 格式的输入时间戳，例如 '2020-12-30 12:13:14.123'，并以相同格式输出时间戳。</li>
          <li>选项 <code>'ISO-8601'</code> 将解析 "yyyy-MM-ddTHH:mm:ss.s{precision}" 格式的输入时间戳，例如 '2020-12-30T12:13:14.123'，并以相同的格式输出时间戳。</li>
        </ul>
        </td>
     </tr>
+    <tr>
+       <td><h5>canal-json.map-null-key.mode</h5></td>
+       <td>选填</td>
+       <td style="word-wrap: break-word;"><code>'FAIL'</code></td>
+       <td>String</td>
+       <td>指定处理 Map 中 key 值为空的方法. 当前支持的值有 <code>'FAIL'</code>, <code>'DROP'</code> 和 <code>'LITERAL'</code>:
+       <ul>
+         <li>Option <code>'FAIL'</code> 将抛出异常，如果遇到 Map 中 key 值为空的数据。</li>
+         <li>Option <code>'DROP'</code> 将丢弃 Map 中 key 值为空的数据项。</li> 
+         <li>Option <code>'LITERAL'</code> 将使用字符串常量来替换 Map 中的空 key 值。字符串常量的值由 <code>'canal-json.map-null-key.literal'</code> 定义。</li>
+       </ul>
+       </td>
+    </tr>
+    <tr>
+      <td><h5>canal-json.map-null-key.literal</h5></td>
+      <td>选填</td>
+      <td style="word-wrap: break-word;">'null'</td>
+      <td>String</td>
+      <td>当 <code>'canal-json.map-null-key.mode'</code> 是 LITERAL 的时候，指定字符串常量替换 Map 中的空 key 值。</td>
+    </tr>       
     <tr>
       <td><h5>canal-json.database.include</h5></td>
       <td>optional</td>

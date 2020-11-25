@@ -71,23 +71,44 @@ cdef class AggregateFunctionRowCoderImpl(FlattenRowCoderImpl):
                     value, output_stream, value.get_row_kind().value)
 
 
-cdef class DataStreamStatelessFlatMapCoderImpl(BaseCoderImpl):
+cdef class DataStreamFlatMapCoderImpl(BaseCoderImpl):
 
     def __init__(self, field_coder):
         self._single_field_coder = field_coder
+        self._end_message = <char*> malloc(1)
+        self._end_message[0] = 0x00
 
     cpdef void encode_to_stream(self, iter_value, LengthPrefixOutputStream output_stream):
         if iter_value:
             for value in iter_value:
                 self._single_field_coder.encode_to_stream(value, output_stream)
+        output_stream.write(self._end_message, 1)
 
     cpdef object decode_from_stream(self, LengthPrefixInputStream input_stream):
         return self._single_field_coder.decode_from_stream(input_stream)
 
-cdef class DataStreamStatelessMapCoderImpl(FlattenRowCoderImpl):
+    def __dealloc__(self):
+        if self._end_message:
+            free(self._end_message)
+
+
+cdef class DataStreamCoFlatMapCoderImpl(BaseCoderImpl):
 
     def __init__(self, field_coder):
-        super(DataStreamStatelessMapCoderImpl, self).__init__([field_coder])
+        self._single_field_coder = field_coder
+
+    cpdef void encode_to_stream(self, iter_value, LengthPrefixOutputStream output_stream):
+        for value in iter_value:
+            self._single_field_coder.encode_to_stream(value, output_stream)
+
+    cpdef object decode_from_stream(self, LengthPrefixInputStream input_stream):
+        return self._single_field_coder.decode_from_stream(input_stream)
+
+
+cdef class DataStreamMapCoderImpl(FlattenRowCoderImpl):
+
+    def __init__(self, field_coder):
+        super(DataStreamMapCoderImpl, self).__init__([field_coder])
         self._single_field_coder = self._field_coders[0]
 
     cpdef void encode_to_stream(self, value, LengthPrefixOutputStream output_stream):

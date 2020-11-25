@@ -1415,7 +1415,7 @@ connector:
 <span class="label label-primary">Source: Batch</span>
 <span class="label label-primary">Sink: Batch</span>
 
-Please refer to [Hive integration]({{ site.baseurl }}/dev/table/hive/).
+Please refer to [Hive integration]({{ site.baseurl }}/dev/table/connectors/hive/).
 
 {% top %}
 
@@ -2122,7 +2122,7 @@ table_env.register_table_sink(
 )
 
 table = ...
-table.insert_into("csvOutputTable")
+table.execute_insert("csvOutputTable").wait()
 {% endhighlight %}
 </div>
 </div>

@@ -49,6 +49,7 @@ import org.apache.flink.api.java.typeutils.PojoTypeInfo;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.DeploymentOptions;
 import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.configuration.PipelineOptions;
@@ -221,7 +222,7 @@ public class StreamExecutionEnvironment {
 			final Configuration configuration,
 			final ClassLoader userClassloader) {
 		this.executorServiceLoader = checkNotNull(executorServiceLoader);
-		this.configuration = checkNotNull(configuration);
+		this.configuration = new Configuration(checkNotNull(configuration));
 		this.userClassloader = userClassloader == null ? getClass().getClassLoader() : userClassloader;
 
 		// the configuration of a job or an operator can be specified at the following places:
@@ -280,6 +281,26 @@ public class StreamExecutionEnvironment {
 	 */
 	public StreamExecutionEnvironment setParallelism(int parallelism) {
 		config.setParallelism(parallelism);
+		return this;
+	}
+
+	/**
+	 * Sets the runtime execution mode for the application (see {@link RuntimeExecutionMode}).
+	 * This is equivalent to setting the {@code execution.runtime-mode} in your application's
+	 * configuration file.
+	 *
+	 * <p>We recommend users to NOT use this method but set the {@code execution.runtime-mode}
+	 * using the command-line when submitting the application. Keeping the application code
+	 * configuration-free allows for more flexibility as the same application will be able to
+	 * be executed in any execution mode.
+	 *
+	 * @param executionMode the desired execution mode.
+	 * @return The execution environment of your application.
+	 */
+	@PublicEvolving
+	public StreamExecutionEnvironment setRuntimeMode(final RuntimeExecutionMode executionMode) {
+		checkNotNull(executionMode);
+		configuration.set(ExecutionOptions.RUNTIME_MODE, executionMode);
 		return this;
 	}
 
@@ -522,6 +543,22 @@ public class StreamExecutionEnvironment {
 	@PublicEvolving
 	public boolean isForceCheckpointing() {
 		return checkpointCfg.isForceCheckpointing();
+	}
+
+	/**
+	 * Returns whether Unaligned Checkpoints are enabled.
+	 */
+	@PublicEvolving
+	public boolean isUnalignedCheckpointsEnabled() {
+		return checkpointCfg.isUnalignedCheckpointsEnabled();
+	}
+
+	/**
+	 * Returns whether Unaligned Checkpoints are force-enabled.
+	 */
+	@PublicEvolving
+	public boolean isForceUnalignedCheckpoints() {
+		return checkpointCfg.isForceUnalignedCheckpoints();
 	}
 
 	/**
@@ -2027,9 +2064,27 @@ public class StreamExecutionEnvironment {
 	 * executed.
 	 */
 	public static StreamExecutionEnvironment getExecutionEnvironment() {
+		return getExecutionEnvironment(new Configuration());
+	}
+
+	/**
+	 * Creates an execution environment that represents the context in which the
+	 * program is currently executed. If the program is invoked standalone, this
+	 * method returns a local execution environment, as returned by
+	 * {@link #createLocalEnvironment(Configuration)}.
+	 *
+	 * <p>When executed from the command line the given configuration is stacked on top of the
+	 * global configuration which comes from the {@code flink-conf.yaml}, potentially overriding
+	 * duplicated options.
+	 *
+	 * @param configuration The configuration to instantiate the environment with.
+	 * @return The execution environment of the context in which the program is
+	 * executed.
+	 */
+	public static StreamExecutionEnvironment getExecutionEnvironment(Configuration configuration) {
 		return Utils.resolveFactory(threadLocalContextEnvironmentFactory, contextEnvironmentFactory)
-			.map(StreamExecutionEnvironmentFactory::createExecutionEnvironment)
-			.orElseGet(StreamExecutionEnvironment::createLocalEnvironment);
+			.map(factory -> factory.createExecutionEnvironment(configuration))
+			.orElseGet(() -> StreamExecutionEnvironment.createLocalEnvironment(configuration));
 	}
 
 	/**
@@ -2072,12 +2127,30 @@ public class StreamExecutionEnvironment {
 	 * @return A local execution environment with the specified parallelism.
 	 */
 	public static LocalStreamEnvironment createLocalEnvironment(int parallelism, Configuration configuration) {
-		final LocalStreamEnvironment currentEnvironment;
+		Configuration copyOfConfiguration = new Configuration();
+		copyOfConfiguration.addAll(configuration);
+		copyOfConfiguration.set(CoreOptions.DEFAULT_PARALLELISM, parallelism);
+		return createLocalEnvironment(copyOfConfiguration);
+	}
 
-		currentEnvironment = new LocalStreamEnvironment(configuration);
-		currentEnvironment.setParallelism(parallelism);
-
-		return currentEnvironment;
+	/**
+	 * Creates a {@link LocalStreamEnvironment}. The local execution environment
+	 * will run the program in a multi-threaded fashion in the same JVM as the
+	 * environment was created in.
+	 *
+	 * 	@param configuration
+	 * 		Pass a custom configuration into the cluster
+	 * @return A local execution environment with the specified parallelism.
+	 */
+	public static LocalStreamEnvironment createLocalEnvironment(Configuration configuration) {
+		if (configuration.getOptional(CoreOptions.DEFAULT_PARALLELISM).isPresent()) {
+			return new LocalStreamEnvironment(configuration);
+		} else {
+			Configuration copyOfConfiguration = new Configuration();
+			copyOfConfiguration.addAll(configuration);
+			copyOfConfiguration.set(CoreOptions.DEFAULT_PARALLELISM, defaultLocalParallelism);
+			return new LocalStreamEnvironment(copyOfConfiguration);
+		}
 	}
 
 	/**
@@ -2100,7 +2173,7 @@ public class StreamExecutionEnvironment {
 			conf.setInteger(RestOptions.PORT, RestOptions.PORT.defaultValue());
 		}
 
-		return createLocalEnvironment(defaultLocalParallelism, conf);
+		return createLocalEnvironment(conf);
 	}
 
 	/**

@@ -15,13 +15,17 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
+import abc
+import time
 from functools import reduce
 from itertools import chain
 
 from apache_beam.coders import PickleCoder
-from typing import Tuple
+from typing import Tuple, Any
 
-from pyflink.datastream.functions import RuntimeContext
+from pyflink.datastream import TimeDomain
+from pyflink.datastream.functions import RuntimeContext, TimerService, Collector, ProcessFunction, \
+    KeyedProcessFunction
 from pyflink.fn_execution import flink_fn_execution_pb2, operation_utils
 from pyflink.fn_execution.beam.beam_coders import DataViewFilterCoder
 from pyflink.fn_execution.operation_utils import extract_user_defined_aggregate_function
@@ -29,10 +33,23 @@ from pyflink.fn_execution.aggregate import RowKeySelector, SimpleAggsHandleFunct
     GroupAggFunction, extract_data_view_specs, DistinctViewDescriptor
 from pyflink.metrics.metricbase import GenericMetricGroup
 from pyflink.table import FunctionContext, Row
-from pyflink.table.functions import Count1AggFunction
 
 
-class Operation(object):
+# table operations
+SCALAR_FUNCTION_URN = "flink:transform:scalar_function:v1"
+TABLE_FUNCTION_URN = "flink:transform:table_function:v1"
+STREAM_GROUP_AGGREGATE_URN = "flink:transform:stream_group_aggregate:v1"
+PANDAS_AGGREGATE_FUNCTION_URN = "flink:transform:aggregate_function:arrow:v1"
+PANDAS_BATCH_OVER_WINDOW_AGGREGATE_FUNCTION_URN = \
+    "flink:transform:batch_over_window_aggregate_function:arrow:v1"
+
+# datastream operations
+DATA_STREAM_STATELESS_FUNCTION_URN = "flink:transform:datastream_stateless_function:v1"
+PROCESS_FUNCTION_URN = "flink:transform:process_function:v1"
+KEYED_PROCESS_FUNCTION_URN = "flink:transform:keyed_process_function:v1"
+
+
+class Operation(abc.ABC):
     def __init__(self, spec):
         super(Operation, self).__init__()
         self.spec = spec
@@ -44,14 +61,16 @@ class Operation(object):
 
     def open(self):
         for user_defined_func in self.user_defined_funcs:
-            user_defined_func.open(FunctionContext(self.base_metric_group))
-
-    def finish(self):
-        self._update_gauge(self.base_metric_group)
+            if hasattr(user_defined_func, 'open'):
+                user_defined_func.open(FunctionContext(self.base_metric_group))
 
     def close(self):
         for user_defined_func in self.user_defined_funcs:
-            user_defined_func.close()
+            if hasattr(user_defined_func, 'close'):
+                user_defined_func.close()
+
+    def finish(self):
+        self._update_gauge(self.base_metric_group)
 
     def _update_gauge(self, base_metric_group):
         if base_metric_group is not None:
@@ -62,6 +81,7 @@ class Operation(object):
             for sub_group in base_metric_group._sub_groups:
                 self._update_gauge(sub_group)
 
+    @abc.abstractmethod
     def generate_func(self, serialized_fn) -> Tuple:
         pass
 
@@ -102,28 +122,6 @@ class TableFunctionOperation(Operation):
             operation_utils.extract_user_defined_function(serialized_fn.udfs[0])
         generate_func = eval('lambda value: %s' % table_function, variable_dict)
         return generate_func, user_defined_funcs
-
-
-class DataStreamStatelessFunctionOperation(Operation):
-
-    def __init__(self, spec):
-        super(DataStreamStatelessFunctionOperation, self).__init__(spec)
-
-    def open(self):
-        for user_defined_func in self.user_defined_funcs:
-            runtime_context = RuntimeContext(
-                self.spec.serialized_fn.runtime_context.task_name,
-                self.spec.serialized_fn.runtime_context.task_name_with_subtasks,
-                self.spec.serialized_fn.runtime_context.number_of_parallel_subtasks,
-                self.spec.serialized_fn.runtime_context.max_number_of_parallel_subtasks,
-                self.spec.serialized_fn.runtime_context.index_of_this_subtask,
-                self.spec.serialized_fn.runtime_context.attempt_number,
-                {p.key: p.value for p in self.spec.serialized_fn.runtime_context.job_parameters})
-            user_defined_func.open(runtime_context)
-
-    def generate_func(self, serialized_fn):
-        func, user_defined_func = operation_utils.extract_data_stream_stateless_funcs(serialized_fn)
-        return func, [user_defined_func]
 
 
 class PandasAggregateFunctionOperation(Operation):
@@ -274,6 +272,7 @@ class StreamGroupAggregateOperation(StatefulFunctionOperation):
         # to track current accumulated messages count. If all the messages are retracted, we need
         # to send a DELETE message to downstream.
         self.index_of_count_star = spec.serialized_fn.index_of_count_star
+        self.count_star_inserted = spec.serialized_fn.count_star_inserted
         self.state_cache_size = spec.serialized_fn.state_cache_size
         self.state_cleaning_enabled = spec.serialized_fn.state_cleaning_enabled
         self.data_view_specs = extract_data_view_specs(spec.serialized_fn.udfs)
@@ -281,6 +280,9 @@ class StreamGroupAggregateOperation(StatefulFunctionOperation):
 
     def open(self):
         self.group_agg_function.open(FunctionContext(self.base_metric_group))
+
+    def close(self):
+        self.group_agg_function.close()
 
     def generate_func(self, serialized_fn):
         user_defined_aggs = []
@@ -292,18 +294,9 @@ class StreamGroupAggregateOperation(StatefulFunctionOperation):
         # and the filter args of them
         distinct_info_dict = {}
         for i in range(len(serialized_fn.udfs)):
-            if i != self.index_of_count_star:
-                user_defined_agg, input_extractor, filter_arg, distinct_index = \
-                    extract_user_defined_aggregate_function(
-                        i, serialized_fn.udfs[i], distinct_info_dict)
-            else:
-                user_defined_agg = Count1AggFunction()
-                filter_arg = -1
-                distinct_index = -1
-
-                def dummy_input_extractor(value):
-                    return []
-                input_extractor = dummy_input_extractor
+            user_defined_agg, input_extractor, filter_arg, distinct_index = \
+                extract_user_defined_aggregate_function(
+                    i, serialized_fn.udfs[i], distinct_info_dict)
             user_defined_aggs.append(user_defined_agg)
             input_extractors.append(input_extractor)
             filter_args.append(filter_arg)
@@ -321,6 +314,7 @@ class StreamGroupAggregateOperation(StatefulFunctionOperation):
             user_defined_aggs,
             input_extractors,
             self.index_of_count_star,
+            self.count_star_inserted,
             self.data_view_specs,
             filter_args,
             distinct_indexes,
@@ -350,6 +344,249 @@ class StreamGroupAggregateOperation(StatefulFunctionOperation):
             self.group_agg_function.on_timer(input_data[3])
             return []
 
-    def close(self):
-        if self.group_agg_function is not None:
-            self.group_agg_function.close()
+
+class DataStreamStatelessFunctionOperation(Operation):
+
+    def __init__(self, spec):
+        super(DataStreamStatelessFunctionOperation, self).__init__(spec)
+
+    def open(self):
+        for user_defined_func in self.user_defined_funcs:
+            if hasattr(user_defined_func, 'open'):
+                runtime_context = RuntimeContext(
+                    self.spec.serialized_fn.runtime_context.task_name,
+                    self.spec.serialized_fn.runtime_context.task_name_with_subtasks,
+                    self.spec.serialized_fn.runtime_context.number_of_parallel_subtasks,
+                    self.spec.serialized_fn.runtime_context.max_number_of_parallel_subtasks,
+                    self.spec.serialized_fn.runtime_context.index_of_this_subtask,
+                    self.spec.serialized_fn.runtime_context.attempt_number,
+                    {p.key: p.value for p in self.spec.serialized_fn.runtime_context.job_parameters}
+                )
+                user_defined_func.open(runtime_context)
+
+    def generate_func(self, serialized_fn):
+        func, user_defined_func = operation_utils.extract_data_stream_stateless_function(
+            serialized_fn)
+        return func, [user_defined_func]
+
+
+class ProcessFunctionOperation(DataStreamStatelessFunctionOperation):
+
+    def __init__(self, spec):
+        self.collector = ProcessFunctionOperation.InternalCollector()
+        self.timer_service = ProcessFunctionOperation.InternalTimerService()
+        self.function_context = ProcessFunctionOperation.InternalProcessFunctionContext(
+            self.timer_service)
+        super(ProcessFunctionOperation, self).__init__(spec)
+
+    def generate_func(self, serialized_fn) -> tuple:
+        func, proc_func = operation_utils.extract_process_function(
+            serialized_fn, self.function_context, self.collector)
+        return func, [proc_func]
+
+    class InternalCollector(Collector):
+        """
+        Internal implementation of the Collector. It uses a buffer list to store data to be emitted.
+        There will be a header flag for each data type. 0 means it is a proc time timer registering
+        request, while 1 means it is an event time timer and 2 means it is a normal data. When
+        registering a timer, it must take along with the corresponding key for it.
+
+        For a ProcessFunction, it will only collect normal data.
+        """
+
+        def __init__(self):
+            self.buf = []
+
+        def collect(self, a: Any):
+            self.buf.append((2, a))
+
+        def clear(self):
+            self.buf.clear()
+
+    class InternalProcessFunctionContext(ProcessFunction.Context):
+        """
+        Internal implementation of ProcessFunction.Context.
+        """
+
+        def __init__(self, timer_service: TimerService):
+            self._timer_service = timer_service
+            self._timestamp = None
+
+        def timer_service(self):
+            return self._timer_service
+
+        def timestamp(self) -> int:
+            return self._timestamp
+
+        def set_timestamp(self, ts: int):
+            self._timestamp = ts
+
+    class InternalTimerService(TimerService):
+        """
+        Internal implementation of TimerService.
+        """
+        def __init__(self):
+            self._current_watermark = None
+
+        def current_processing_time(self) -> int:
+            return int(time.time() * 1000)
+
+        def current_watermark(self):
+            return self._current_watermark
+
+        def set_current_watermark(self, wm):
+            self._current_watermark = wm
+
+        def register_processing_time_timer(self, t: int):
+            raise Exception("Register timers is only supported on a keyed stream.")
+
+        def register_event_time_timer(self, t: int):
+            raise Exception("Register timers is only supported on a keyed stream.")
+
+
+class KeyedProcessFunctionOperation(StatefulFunctionOperation):
+
+    def __init__(self, spec, keyed_state_backend):
+        self._collector = KeyedProcessFunctionOperation.InternalCollector()
+        internal_timer_service = KeyedProcessFunctionOperation.InternalTimerService(
+            self._collector, keyed_state_backend)
+        self.function_context = KeyedProcessFunctionOperation.InternalKeyedProcessFunctionContext(
+            internal_timer_service)
+        self.on_timer_ctx = KeyedProcessFunctionOperation\
+            .InternalKeyedProcessFunctionOnTimerContext(internal_timer_service)
+        super(KeyedProcessFunctionOperation, self).__init__(spec, keyed_state_backend)
+
+    def generate_func(self, serialized_fn) -> Tuple:
+        func, proc_func = operation_utils.extract_keyed_process_function(
+            serialized_fn, self.function_context, self.on_timer_ctx, self._collector,
+            self.keyed_state_backend)
+        return func, [proc_func]
+
+    class InternalCollector(Collector):
+        """
+        Internal implementation of the Collector. It uses a buffer list to store data to be emitted.
+        There will be a header flag for each data type. 0 means it is a proc time timer registering
+        request, while 1 means it is an event time timer and 2 means it is a normal data. When
+        registering a timer, it must take along with the corresponding key for it.
+        """
+
+        def __init__(self):
+            self.buf = []
+
+        def collect_reg_proc_timer(self, a: Any, key: Any):
+            self.buf.append(
+                (operation_utils.KeyedProcessFunctionOutputFlag.REGISTER_PROC_TIMER.value,
+                 a, key, None))
+
+        def collect_reg_event_timer(self, a: Any, key: Any):
+            self.buf.append(
+                (operation_utils.KeyedProcessFunctionOutputFlag.REGISTER_EVENT_TIMER.value,
+                 a, key, None))
+
+        def collect_del_proc_timer(self, a: Any, key: Any):
+            self.buf.append(
+                (operation_utils.KeyedProcessFunctionOutputFlag.DEL_PROC_TIMER.value,
+                 a, key, None))
+
+        def collect_del_event_timer(self, a: Any, key: Any):
+            self.buf.append(
+                (operation_utils.KeyedProcessFunctionOutputFlag.DEL_EVENT_TIMER.value,
+                 a, key, None))
+
+        def collect(self, a: Any):
+            self.buf.append((operation_utils.KeyedProcessFunctionOutputFlag.NORMAL_DATA.value, a))
+
+        def clear(self):
+            self.buf.clear()
+
+    class InternalKeyedProcessFunctionOnTimerContext(KeyedProcessFunction.OnTimerContext):
+        """
+        Internal implementation of ProcessFunction.OnTimerContext.
+        """
+
+        def __init__(self, timer_service: TimerService):
+            self._timer_service = timer_service
+            self._time_domain = None
+            self._timestamp = None
+            self._current_key = None
+
+        def get_current_key(self):
+            return self._current_key
+
+        def set_current_key(self, current_key):
+            self._current_key = current_key
+
+        def timer_service(self) -> TimerService:
+            return self._timer_service
+
+        def timestamp(self) -> int:
+            return self._timestamp
+
+        def set_timestamp(self, ts: int):
+            self._timestamp = ts
+
+        def time_domain(self) -> TimeDomain:
+            return self._time_domain
+
+        def set_time_domain(self, td: TimeDomain):
+            self._time_domain = td
+
+    class InternalKeyedProcessFunctionContext(KeyedProcessFunction.Context):
+        """
+        Internal implementation of KeyedProcessFunction.Context.
+        """
+
+        def __init__(self, timer_service: TimerService):
+            self._timer_service = timer_service
+            self._timestamp = None
+            self._current_key = None
+
+        def get_current_key(self):
+            return self._current_key
+
+        def set_current_key(self, current_key):
+            self._current_key = current_key
+
+        def timer_service(self) -> TimerService:
+            return self._timer_service
+
+        def timestamp(self) -> int:
+            return self._timestamp
+
+        def set_timestamp(self, ts: int):
+            self._timestamp = ts
+
+    class InternalTimerService(TimerService):
+        """
+        Internal implementation of TimerService.
+        """
+
+        def __init__(self, collector, keyed_state_backend):
+            self._collector = collector
+            self._keyed_state_backend = keyed_state_backend
+            self._current_watermark = None
+
+        def current_processing_time(self) -> int:
+            return int(time.time() * 1000)
+
+        def current_watermark(self) -> int:
+            return self._current_watermark
+
+        def set_current_watermark(self, wm):
+            self._current_watermark = wm
+
+        def register_processing_time_timer(self, t: int):
+            current_key = self._keyed_state_backend.get_current_key()
+            self._collector.collect_reg_proc_timer(t, current_key)
+
+        def register_event_time_timer(self, t: int):
+            current_key = self._keyed_state_backend.get_current_key()
+            self._collector.collect_reg_event_timer(t, current_key)
+
+        def delete_processing_time_timer(self, t: int):
+            current_key = self._keyed_state_backend.get_current_key()
+            self._collector.collect_del_proc_timer(t, current_key)
+
+        def delete_event_time_timer(self, t: int):
+            current_key = self._keyed_state_backend.get_current_key()
+            self._collector.collect_del_event_timer(t, current_key)

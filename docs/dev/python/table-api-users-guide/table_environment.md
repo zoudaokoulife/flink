@@ -548,7 +548,7 @@ For more details about the different kinds of UDFs, please refer to [User Define
 ### Dependency Management
 
 These APIs are used to manage the Python dependencies which are required by the Python UDFs.
-Please refer to the [Dependency Management]({% link dev/python/table-api-users-guide/dependency_management.md %}#python-dependency) documentation for more details.
+Please refer to the [Dependency Management]({% link dev/python/table-api-users-guide/dependency_management.md %}#python-dependency-in-python-program) documentation for more details.
 
 <table class="table table-bordered">
   <thead>
@@ -615,7 +615,7 @@ Please refer to the [Dependency Management]({% link dev/python/table-api-users-g
       <td>
         Returns the table config to define the runtime behavior of the Table API.
         You can find all the available configuration options in <a href="{{ site.baseurl }}/ops/config.html">Configuration</a> and
-        <a href="{{ site.baseurl }}/dev/python/table-api-users-guide/python_config.html">Python Configuation</a>. <br> <br>
+        <a href="{{ site.baseurl }}/dev/python/python_config.html">Python Configuation</a>. <br> <br>
         The following code is an example showing how to set the configuration options through this API:
 {% highlight python %}
 # set the parallelism to 8
