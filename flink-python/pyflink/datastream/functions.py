@@ -22,6 +22,8 @@ from typing import Union, Any, Dict
 
 from py4j.java_gateway import JavaObject
 
+from pyflink.common.state import ValueState, ValueStateDescriptor, \
+    ListStateDescriptor, ListState, MapStateDescriptor, MapState
 from pyflink.datastream.time_domain import TimeDomain
 from pyflink.java_gateway import get_gateway
 
@@ -38,8 +40,8 @@ __all__ = [
     'SourceFunction',
     'SinkFunction',
     'ProcessFunction',
-    'Collector',
-    'KeyedProcessFunction']
+    'KeyedProcessFunction',
+    'TimerService']
 
 
 class RuntimeContext(object):
@@ -110,6 +112,38 @@ class RuntimeContext(object):
         Gets the global job parameter value associated with the given key as a string.
         """
         return self._job_parameters[key] if key in self._job_parameters else default_value
+
+    def get_state(self, state_descriptor: ValueStateDescriptor) -> ValueState:
+        """
+        Gets a handle to the system's key/value state. THe key/value state is only accessible if the
+        function is executed on a KeyedStream. On each access, the state exposes the value for the
+        key of the element currently processed by the function. Each function may have multiple
+        partitioned states, addressed with different names.
+
+        Because the scope of each value is the key of the currently processed element, and the
+        elements are distributed by the Flink runtime, the system can transparently scale out and
+        redistribute the state and KeyedStream.
+        """
+        pass
+
+    def get_list_state(self, state_descriptor: ListStateDescriptor) -> ListState:
+        """
+        Gets a handle to the system's key/value list state. This state is similar to the value state
+        access, but is optimized for state that holds lists. One can add elements to the list, or
+        retrieve the list as a whle.
+
+        This state is only accessible if the function is executed on a KeyedStream.
+        """
+        pass
+
+    def get_map_state(self, state_descriptor: MapStateDescriptor) -> MapState:
+        """
+        Gets a handle to the system's key/value map state. This state is similar to the value state
+        access, but is optimized for state that is composed of user-defined key-value pairs.
+
+        This state is only accessible if the function is executed on a KeyedStream.
+        """
+        pass
 
 
 class Function(abc.ABC):
@@ -560,20 +594,6 @@ class SinkFunction(JavaFunctionWrapper):
         super(SinkFunction, self).__init__(sink_func)
 
 
-class Collector(abc.ABC):
-    """
-    Collects a record and forwards it.
-    """
-    @abc.abstractmethod
-    def collect(self, value):
-        """
-        Emits a record.
-
-        :param value: The record to collect.
-        """
-        pass
-
-
 class TimerService(abc.ABC):
     """
     Interface for working with time and timers.
@@ -681,7 +701,7 @@ class ProcessFunction(Function):
             pass
 
     @abc.abstractmethod
-    def process_element(self, value, ctx: 'ProcessFunction.Context', out: Collector):
+    def process_element(self, value, ctx: 'ProcessFunction.Context'):
         """
         Process one element from the input stream.
 
@@ -692,7 +712,6 @@ class ProcessFunction(Function):
         :param ctx:  A Context that allows querying the timestamp of the element and getting a
                      TimerService for registering timers and querying the time. The context is only
                      valid during the invocation of this method, do not store it.
-        :param out: The collector for returning result values.
         """
         pass
 
@@ -756,7 +775,7 @@ class KeyedProcessFunction(Function, ABC):
             pass
 
     @abc.abstractmethod
-    def process_element(self, value, ctx: 'KeyedProcessFunction.Context', out: Collector):
+    def process_element(self, value, ctx: 'KeyedProcessFunction.Context'):
         """
         Process one element from the input stream.
 
@@ -767,11 +786,10 @@ class KeyedProcessFunction(Function, ABC):
         :param ctx:  A Context that allows querying the timestamp of the element and getting a
                      TimerService for registering timers and querying the time. The context is only
                      valid during the invocation of this method, do not store it.
-        :param out: The collector for returning result values.
         """
         pass
 
-    def on_timer(self, timestamp: int, ctx: 'KeyedProcessFunction.OnTimerContext', out: Collector):
+    def on_timer(self, timestamp: int, ctx: 'KeyedProcessFunction.OnTimerContext'):
         """
         Called when a timer set using TimerService fires.
 
@@ -780,6 +798,5 @@ class KeyedProcessFunction(Function, ABC):
                     querying the TimeDomain of the firing timer and getting a TimerService for
                     registering timers and querying the time. The context is only valid during the
                     invocation of this method, do not store it.
-        :param out: The collector for returning result values.
         """
         pass
